@@ -25,8 +25,8 @@ private[effect] object IOParMap {
   import Callback.{Type => Callback}
 
   /** Implementation for `parMap2`. */
-  def apply[A, B, C](fa: IO[A], fb: IO[B])(f: (A, B) => C): IO[C] =
-    IO.Async { (conn, cb) =>
+  def apply[E <: AnyRef, A, B, C](fa: IO[E, A], fb: IO[E, B])(f: (A, B) => C): IO[E, C] =
+    IO.Async[E, C] { (conn, cb) =>
       // For preventing stack-overflow errors; using a
       // trampolined execution context, so no thread forks
       implicit val ec: ExecutionContext = TrampolineEC.immediate
@@ -59,7 +59,7 @@ private[effect] object IOParMap {
         }
 
         /** Callback for the left task. */
-        def callbackA(connB: IOConnection): Callback[A] = {
+        def callbackA(connB: IOConnection): Callback[E, A] = {
           case Left(e) => sendError(connB, e)
           case Right(a) =>
             // Using Java 8 platform intrinsics
@@ -76,7 +76,7 @@ private[effect] object IOParMap {
         }
 
         /** Callback for the right task. */
-        def callbackB(connA: IOConnection): Callback[B] = {
+        def callbackB(connA: IOConnection): Callback[E, B] = {
           case Left(e) => sendError(connA, e)
           case Right(b) =>
             // Using Java 8 platform intrinsics
@@ -94,14 +94,19 @@ private[effect] object IOParMap {
 
         /** Called when both results are ready. */
         def complete(a: A, b: B): Unit = {
-          cb.async(conn, try Right(f(a, b)) catch { case NonFatal(e) => Left(e) })
+          cb.async(conn, try Right(f(a, b)) catch {
+            case NonFatal(e) =>
+              val ex = new IORunLoop.CustomException(e)
+              Logger.reportFailure(ex)
+              throw ex
+          })
         }
 
         /** Called when an error is generated. */
-        def sendError(other: IOConnection, e: Throwable): Unit =
+        def sendError(other: IOConnection, e: E): Unit =
           state.getAndSet(e) match {
             case _: Throwable =>
-              Logger.reportFailure(e)
+              Logger.reportFailure(new IORunLoop.CustomException(e))
             case null | Left(_) | Right(_) =>
               // Cancels the other before signaling the error
               try other.cancel() finally

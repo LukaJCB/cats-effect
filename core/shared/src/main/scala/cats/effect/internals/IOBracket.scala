@@ -17,32 +17,29 @@
 package cats.effect.internals
 
 import cats.effect.{ExitCase, IO}
-import scala.concurrent.CancellationException
 
 private[effect] object IOBracket {
-
-  private final val cancelException = new CancellationException("cancel in bracket")
 
   /**
     * Implementation for `IO.bracket`.
     */
-  def apply[A, B](acquire: IO[A])
-    (use: A => IO[B])
-    (release: (A, ExitCase[Throwable]) => IO[Unit]): IO[B] = {
+  def apply[E, A, B](acquire: IO[E, A])
+    (use: A => IO[E, B])
+    (release: (A, ExitCase[E]) => IO[E, Unit]): IO[E, B] = {
 
     acquire.flatMap { a =>
       IO.Bind(
-        use(a).onCancelRaiseError(cancelException),
-        new ReleaseFrame[A, B](a, release))
+        use(a).onCancelRaiseError(null.asInstanceOf[E]),
+        new ReleaseFrame[E, A, B](a, release))
     }
   }
 
-  private final class ReleaseFrame[A, B](a: A,
-    release: (A, ExitCase[Throwable]) => IO[Unit])
-    extends IOFrame[B, IO[B]] {
+  private final class ReleaseFrame[E, A, B](a: A,
+    release: (A, ExitCase[E]) => IO[E, Unit])
+    extends IOFrame[E, B, IO[E, B]] {
 
-    def recover(e: Throwable): IO[B] = {
-      if (e ne cancelException)
+    def recover(e: E): IO[E, B] = {
+      if (e != null)
         release(a, ExitCase.error(e))
           .flatMap(new ReleaseRecover(e))
       else
@@ -50,22 +47,22 @@ private[effect] object IOBracket {
           .flatMap(Function.const(IO.never))
     }
 
-    def apply(b: B): IO[B] =
+    def apply(b: B): IO[E, B] =
       release(a, ExitCase.complete)
         .map(_ => b)
   }
 
-  private final class ReleaseRecover(e: Throwable)
-    extends IOFrame[Unit, IO[Nothing]] {
+  private final class ReleaseRecover[E](e: E)
+    extends IOFrame[E, Unit, IO[E, Nothing]] {
 
-    def recover(e2: Throwable): IO[Nothing] = {
+    def recover(e2: E): IO[E, Nothing] = {
       // Logging the error somewhere, because exceptions
       // should never be silent
-      Logger.reportFailure(e2)
+      Logger.reportFailure(new IORunLoop.CustomException(e2))
       IO.raiseError(e)
     }
 
-    def apply(a: Unit): IO[Nothing] =
+    def apply(a: Unit): IO[E, Nothing] =
       IO.raiseError(e)
   }
 }

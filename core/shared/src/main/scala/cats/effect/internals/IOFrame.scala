@@ -28,13 +28,13 @@ import cats.effect.IO
   * Internal to `IO`'s implementations, used to specify
   * error handlers in their respective `Bind` internal states.
   */
-private[effect] abstract class IOFrame[-A, +R]
+private[effect] abstract class IOFrame[E, -A, +R]
   extends (A => R) { self =>
 
   def apply(a: A): R
-  def recover(e: Throwable): R
+  def recover(e: E): R
 
-  final def fold(value: Either[Throwable, A]): R =
+  final def fold(value: Either[E, A]): R =
     value match {
       case Right(a) => apply(a)
       case Left(e) => recover(e)
@@ -45,16 +45,16 @@ private[effect] object IOFrame {
   /** Builds a [[IOFrame]] instance that maps errors, but that isn't
     * defined for successful values (a partial function)
     */
-  def errorHandler[A](fe: Throwable => IO[A]): IOFrame[A, IO[A]] =
+  def errorHandler[E, A](fe: E => IO[E, A]): IOFrame[E, A, IO[E, A]] =
     new ErrorHandler(fe)
 
   /** [[IOFrame]] reference that only handles errors, useful for
     * quick filtering of `onErrorHandleWith` frames.
     */
-  final class ErrorHandler[A](fe: Throwable => IO[A])
-    extends IOFrame[A, IO[A]] {
+  final class ErrorHandler[E, A](fe: E => IO[E, A])
+    extends IOFrame[E, A, IO[E, A]] {
 
-    def recover(e: Throwable): IO[A] = fe(e)
-    def apply(a: A): IO[A] = IO.pure(a)
+    def recover(e: E): IO[E, A] = fe(e)
+    def apply(a: A): IO[E, A] = IO.pure(a)
   }
 }

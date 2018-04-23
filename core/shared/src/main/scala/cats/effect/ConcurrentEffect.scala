@@ -59,7 +59,7 @@ trait ConcurrentEffect[F[_]] extends Concurrent[F] with Effect[F] {
    *   cancel.unsafeRunSync
    * }}}
    */
-  def runCancelable[A](fa: F[A])(cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]]
+  def runCancelable[A](fa: F[A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, IO[Throwable, Unit]]
 }
 
 object ConcurrentEffect {
@@ -92,7 +92,7 @@ object ConcurrentEffect {
     protected def F: ConcurrentEffect[F]
 
     def runCancelable[A](fa: EitherT[F, Throwable, A])
-      (cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]] =
+      (cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, IO[Throwable, Unit]] =
       F.runCancelable(fa.value)(cb.compose(_.right.flatMap(x => x)))
   }
 
@@ -105,7 +105,7 @@ object ConcurrentEffect {
     protected def S: Monoid[S]
 
     def runCancelable[A](fa: StateT[F, S, A])
-      (cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]] =
+      (cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, IO[Throwable, Unit]] =
       F.runCancelable(fa.runA(S.empty)(F))(cb)
   }
 
@@ -118,7 +118,7 @@ object ConcurrentEffect {
     protected def L: Monoid[L]
 
     def runCancelable[A](fa: WriterT[F, L, A])
-      (cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]] =
+      (cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, IO[Throwable, Unit]] =
       F.runCancelable(fa.run)(cb.compose(_.right.map(_._2)))
   }
 }

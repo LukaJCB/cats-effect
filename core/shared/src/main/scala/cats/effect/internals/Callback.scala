@@ -19,24 +19,25 @@ package cats.effect.internals
 import java.util.concurrent.atomic.AtomicBoolean
 import cats.effect.internals.TrampolineEC.immediate
 import scala.concurrent.Promise
-import scala.util.{Failure, Left, Success, Try}
+import scala.util.Left
+import IORunLoop.CustomException
 
 /**
  * Internal API — utilities for working with `IO.async` callbacks.
  */
 private[effect] object Callback {
-  type Type[-A] = Either[Throwable, A] => Unit
+  type Type[-E, -A] = Either[E, A] => Unit
 
   /**
    * Builds a callback reference that throws any received
    * error immediately.
    */
-  def report[A]: Type[A] =
-    reportRef.asInstanceOf[Type[A]]
+  def report[E, A]: Type[E, A] =
+    reportRef.asInstanceOf[Type[E, A]]
 
-  private val reportRef = (r: Either[Throwable, _]) =>
+  private def reportRef[E] = (r: Either[E, _]) =>
     r match {
-      case Left(e) => Logger.reportFailure(e)
+      case Left(e) => Logger.reportFailure(new CustomException(e))
       case _ => ()
     }
 
@@ -47,7 +48,7 @@ private[effect] object Callback {
   final val dummy1: Any => Unit = _ => ()
 
   /** Builds a callback with async execution. */
-  def async[A](cb: Type[A]): Type[A] =
+  def async[E, A](cb: Type[E, A]): Type[E, A] =
     async(null, cb)
 
   /**
@@ -56,7 +57,7 @@ private[effect] object Callback {
    * Also pops the `Connection` just before triggering
    * the underlying callback.
    */
-  def async[A](conn: IOConnection, cb: Type[A]): Type[A] =
+  def async[E, A](conn: IOConnection, cb: Type[E, A]): Type[E, A] =
     value => immediate.execute(
       new Runnable {
         def run(): Unit = {
@@ -73,24 +74,24 @@ private[effect] object Callback {
    *  - pops the given `Connection` (only if != null)
    *  - logs extraneous errors after callback was already called once
    */
-  def asyncIdempotent[A](conn: IOConnection, cb: Type[A]): Type[A] =
-    new AsyncIdempotentCallback[A](conn, cb)
+  def asyncIdempotent[E, A](conn: IOConnection, cb: Type[E, A]): Type[E, A] =
+    new AsyncIdempotentCallback[E, A](conn, cb)
 
   /**
    * Builds a callback from a standard Scala `Promise`.
    */
-  def promise[A](p: Promise[A]): Type[A] = {
+  def promise[E, A](p: Promise[A]): Type[E, A] = {
     case Right(a) => p.success(a)
-    case Left(e) => p.failure(e)
+    case Left(e) => p.failure(new CustomException(e))
   }
 
   /** Helpers async callbacks. */
-  implicit final class Extensions[-A](val self: Type[A]) extends AnyVal {
+  implicit final class Extensions[-E, -A](val self: Type[E, A]) extends AnyVal {
     /**
      * Executes the source callback with a light (trampolined) async
      * boundary, meant to protect against stack overflows.
      */
-    def async(value: Either[Throwable, A]): Unit =
+    def async(value: Either[E, A]): Unit =
       async(null, value)
 
     /**
@@ -99,7 +100,7 @@ private[effect] object Callback {
      *
      * Also pops the given `Connection` before calling the callback.
      */
-    def async(conn: IOConnection, value: Either[Throwable, A]): Unit =
+    def async(conn: IOConnection, value: Either[E, A]): Unit =
       immediate.execute(new Runnable {
         def run(): Unit = {
           if (conn ne null) conn.pop()
@@ -107,34 +108,16 @@ private[effect] object Callback {
         }
       })
 
-    /**
-     * Given a standard Scala `Try`, converts it to an `Either` and
-     * call the callback with it.
-     */
-    def completeWithTry(result: Try[A]): Unit =
-      self(result match {
-        case Success(a) => Right(a)
-        case Failure(e) => Left(e)
-      })
-
-    /**
-     * Like [[completeWithTry]], but with an extra light async boundary.
-     */
-    def completeWithTryAsync(result: Try[A]): Unit =
-      result match {
-        case Success(a) => self(Right(a))
-        case Failure(e) => self(Left(e))
-      }
   }
 
-  private final class AsyncIdempotentCallback[-A](
+  private final class AsyncIdempotentCallback[-E, -A](
     conn: IOConnection,
-    cb: Either[Throwable, A] => Unit)
-    extends (Either[Throwable, A] => Unit) {
+    cb: Either[E, A] => Unit)
+    extends (Either[E, A] => Unit) {
 
     private[this] val canCall = new AtomicBoolean(true)
 
-    def apply(value: Either[Throwable, A]): Unit = {
+    def apply(value: Either[E, A]): Unit = {
       if (canCall.getAndSet(false)) {
         immediate.execute(new Runnable {
           def run(): Unit = {
@@ -145,7 +128,7 @@ private[effect] object Callback {
       } else value match {
         case Right(_) => ()
         case Left(e) =>
-          Logger.reportFailure(e)
+          Logger.reportFailure(new CustomException(e))
       }
     }
   }

@@ -26,8 +26,8 @@ private[effect] object IOCancel {
   import Callback.{rightUnit, Type => Callback}
 
   /** Implementation for `IO.cancel`. */
-  def signal[A](fa: IO[A]): IO[Unit] =
-    Async { (_, cb) =>
+  def signal[E, A](fa: IO[E, A]): IO[E, Unit] =
+    Async[E, Unit] { (_, cb) =>
       ec.execute(new Runnable {
         def run(): Unit = {
           // Ironically, in order to describe cancellation as a pure operation
@@ -42,8 +42,8 @@ private[effect] object IOCancel {
     }
 
   /** Implementation for `IO.cancel`. */
-  def raise[A](fa: IO[A], e: Throwable): IO[A] =
-    Async { (conn, cb) =>
+  def raise[E, A](fa: IO[E, A], e: E): IO[E, A] =
+    Async[E, A] { (conn, cb) =>
       val canCall = new AtomicBoolean(true)
       // Registering a special cancelable that will trigger error on cancel.
       // Note the pair `conn.pop` happens in `RaiseCallback`.
@@ -51,15 +51,15 @@ private[effect] object IOCancel {
 
       ec.execute(new Runnable {
         def run(): Unit = {
-          val cb2 = new RaiseCallback[A](canCall, conn, cb)
+          val cb2 = new RaiseCallback[E, A](canCall, conn, cb)
           IORunLoop.startCancelable(fa, conn, cb2)
         }
       })
     }
 
   /** Implementation for `IO.uncancelable`. */
-  def uncancelable[A](fa: IO[A]): IO[A] =
-    Async { (_, cb) =>
+  def uncancelable[E, A](fa: IO[E, A]): IO[E, A] =
+    Async[E, A] { (_, cb) =>
       // First async (trampolined) boundary
       ec.execute(new Runnable {
         def run(): Unit = {
@@ -71,26 +71,26 @@ private[effect] object IOCancel {
       })
     }
 
-  private final class RaiseCallback[A](
+  private final class RaiseCallback[E, A](
     active: AtomicBoolean,
     conn: IOConnection,
-    cb: Callback[A])
-    extends Callback[A] {
+    cb: Callback[E, A])
+    extends Callback[E, A] {
 
-    def apply(value: Either[Throwable, A]): Unit =
+    def apply(value: Either[E, A]): Unit =
       if (active.getAndSet(false)) {
         conn.pop()
         ec.execute(new Runnable { def run() = cb(value) })
       } else value match {
-        case Left(e) => throw e
+        case Left(e) => throw new IORunLoop.CustomException(e)
         case _ => ()
       }
   }
 
-  private final class RaiseCancelable[A](
+  private final class RaiseCancelable[E, A](
     active: AtomicBoolean,
-    cb: Either[Throwable, A] => Unit,
-    e: Throwable)
+    cb: Either[E, A] => Unit,
+    e: E)
     extends (() => Unit) {
 
     def apply(): Unit =

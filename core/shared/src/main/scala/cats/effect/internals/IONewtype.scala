@@ -33,11 +33,11 @@ import cats.effect.IO
 private[effect] abstract class IONewtype { self =>
   type Base
   trait Tag extends Any
-  type Type[+A] <: Base with Tag
+  type Type[E, +A] <: Base with Tag
 
-  def apply[A](fa: IO[A]): Type[A] =
-    fa.asInstanceOf[Type[A]]
+  def apply[E, A](fa: IO[E, A]): Type[E, A] =
+    fa.asInstanceOf[Type[E, A]]
 
-  def unwrap[A](fa: Type[A]): IO[A] =
-    fa.asInstanceOf[IO[A]]
+  def unwrap[E, A](fa: Type[E, A]): IO[E, A] =
+    fa.asInstanceOf[IO[E, A]]
 }

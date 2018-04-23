@@ -31,9 +31,9 @@ private[effect] object IOPlatform {
    * allowing for defensive measures, like adding more threads or
    * executing other queued tasks first.
    */
-  def unsafeResync[A](ioa: IO[A], limit: Duration): Option[A] = {
+  def unsafeResync[E, A](ioa: IO[E, A], limit: Duration): Option[A] = {
     val latch = new OneShotLatch
-    var ref: Either[Throwable, A] = null
+    var ref: Either[E, A] = null
 
     ioa unsafeRunAsync { a =>
       // Reading from `ref` happens after the block on `latch` is
@@ -57,7 +57,7 @@ private[effect] object IOPlatform {
     ref match {
       case null => None
       case Right(a) => Some(a)
-      case Left(ex) => throw ex
+      case Left(ex) => throw new IORunLoop.CustomException(ex)
     }
   }
 

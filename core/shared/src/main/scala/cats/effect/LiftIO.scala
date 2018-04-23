@@ -28,7 +28,7 @@ import scala.annotation.implicitNotFound
 Building this implicit value might depend on having an implicit
 s.c.ExecutionContext in scope, a Scheduler or some equivalent type.""")
 trait LiftIO[F[_]] {
-  def liftIO[A](ioa: IO[A]): F[A]
+  def liftIO[A](ioa: IO[Throwable, A]): F[A]
 }
 
 object LiftIO {
@@ -71,14 +71,14 @@ object LiftIO {
     protected implicit def F: LiftIO[F]
     protected def FF: Functor[F]
 
-    override def liftIO[A](ioa: IO[A]): EitherT[F, L, A] =
+    override def liftIO[A](ioa: IO[Throwable, A]): EitherT[F, L, A] =
       EitherT.liftF(F.liftIO(ioa))(FF)
   }
 
   private[effect] trait KleisliLiftIO[F[_], R] extends LiftIO[Kleisli[F, R, ?]] {
     protected implicit def F: LiftIO[F]
 
-    override def liftIO[A](ioa: IO[A]): Kleisli[F, R, A] =
+    override def liftIO[A](ioa: IO[Throwable, A]): Kleisli[F, R, A] =
       Kleisli.liftF(F.liftIO(ioa))
   }
 
@@ -86,7 +86,7 @@ object LiftIO {
     protected implicit def F: LiftIO[F]
     protected def FF: Functor[F]
 
-    override def liftIO[A](ioa: IO[A]): OptionT[F, A] =
+    override def liftIO[A](ioa: IO[Throwable, A]): OptionT[F, A] =
       OptionT.liftF(F.liftIO(ioa))(FF)
   }
 
@@ -94,7 +94,7 @@ object LiftIO {
     protected implicit def F: LiftIO[F]
     protected def FA: Applicative[F]
 
-    override def liftIO[A](ioa: IO[A]): StateT[F, S, A] =
+    override def liftIO[A](ioa: IO[Throwable, A]): StateT[F, S, A] =
       StateT.liftF(F.liftIO(ioa))(FA)
   }
 
@@ -103,7 +103,7 @@ object LiftIO {
     protected implicit def L: Monoid[L]
     protected def FA: Applicative[F]
 
-    override def liftIO[A](ioa: IO[A]): WriterT[F, L, A] =
+    override def liftIO[A](ioa: IO[Throwable, A]): WriterT[F, L, A] =
       WriterT.liftF(F.liftIO(ioa))(L, FA)
   }
 }

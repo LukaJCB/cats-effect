@@ -54,7 +54,7 @@ trait Effect[F[_]] extends Async[F] {
    *   io.unsafeRunSync
    * }}}
    */
-  def runAsync[A](fa: F[A])(cb: Either[Throwable, A] => IO[Unit]): IO[Unit]
+  def runAsync[A](fa: F[A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, Unit]
 }
 
 object Effect {
@@ -84,7 +84,7 @@ object Effect {
 
     protected def F: Effect[F]
 
-    def runAsync[A](fa: EitherT[F, Throwable, A])(cb: Either[Throwable, A] => IO[Unit]): IO[Unit] =
+    def runAsync[A](fa: EitherT[F, Throwable, A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, Unit] =
       F.runAsync(fa.value)(cb.compose(_.right.flatMap(x => x)))
   }
 
@@ -94,7 +94,7 @@ object Effect {
     protected def F: Effect[F]
     protected def S: Monoid[S]
 
-    def runAsync[A](fa: StateT[F, S, A])(cb: Either[Throwable, A] => IO[Unit]): IO[Unit] =
+    def runAsync[A](fa: StateT[F, S, A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, Unit] =
       F.runAsync(fa.runA(S.empty)(F))(cb)
   }
 
@@ -104,7 +104,7 @@ object Effect {
     protected def F: Effect[F]
     protected def L: Monoid[L]
 
-    def runAsync[A](fa: WriterT[F, L, A])(cb: Either[Throwable, A] => IO[Unit]): IO[Unit] =
+    def runAsync[A](fa: WriterT[F, L, A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, Unit] =
       F.runAsync(fa.run)(cb.compose(_.right.map(_._2)))
   }
 }

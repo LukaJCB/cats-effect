@@ -24,14 +24,14 @@ private[effect] object IOStart {
   /**
    * Implementation for `IO.start`.
    */
-  def apply[A](fa: IO[A]): IO[Fiber[IO, A]] =
+  def apply[E, A](fa: IO[E, A]): IO[E, Fiber[IO[E, ?], A]] =
     IO.Async { (_, cb) =>
       implicit val ec: ExecutionContext = immediate
       // Light async boundary
       ec.execute(new Runnable {
         def run(): Unit = {
           // Memoization
-          val p = Promise[Either[Throwable, A]]()
+          val p = Promise[Either[E, A]]()
 
           // Starting the source `IO`, with a new connection, because its
           // cancellation is now decoupled from our current one

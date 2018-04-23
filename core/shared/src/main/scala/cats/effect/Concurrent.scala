@@ -177,7 +177,7 @@ trait Concurrent[F[_]] extends Async[F] {
    *   }
    * }}}
    */
-  def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): F[A]
+  def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): F[A]
 
   /**
    * Returns a new `F` that mirrors the source, but that is uninterruptible.
@@ -394,7 +394,7 @@ trait Concurrent[F[_]] extends Async[F] {
    * use [[Concurrent$.liftIO Concurrent.liftIO]]
    * (on the object companion).
    */
-  override def liftIO[A](ioa: IO[A]): F[A] =
+  override def liftIO[A](ioa: IO[Throwable, A]): F[A] =
     Concurrent.liftIO(ioa)(this)
 }
 
@@ -408,18 +408,18 @@ object Concurrent {
    *
    * This is the default `Concurrent.liftIO` implementation.
    */
-  def liftIO[F[_], A](ioa: IO[A])(implicit F: Concurrent[F]): F[A] =
+  def liftIO[F[_], A](ioa: IO[Throwable, A])(implicit F: Concurrent[F]): F[A] =
     ioa match {
       case Pure(a) => F.pure(a)
       case RaiseError(e) => F.raiseError(e)
-      case Delay(thunk) => F.delay(thunk())
+      case Delay(thunk, f) => F.delay(thunk())
       case _ =>
         F.suspend {
           IORunLoop.step(ioa) match {
             case Pure(a) => F.pure(a)
             case RaiseError(e) => F.raiseError(e)
             case async =>
-              F.cancelable(cb => IO.Delay(async.unsafeRunCancelable(cb)))
+              F.cancelable(cb => IO.Delay(async.unsafeRunCancelable(cb), identity))
           }
         }
     }
@@ -469,7 +469,7 @@ object Concurrent {
     // compiler will choke on type inference :-(
     type Fiber[A] = cats.effect.Fiber[EitherT[F, L, ?], A]
 
-    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): EitherT[F, L, A] =
+    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): EitherT[F, L, A] =
       EitherT.liftF(F.cancelable(k))(F)
 
     def uncancelable[A](fa: EitherT[F, L, A]): EitherT[F, L, A] =
@@ -513,7 +513,7 @@ object Concurrent {
     // compiler will choke on type inference :-(
     type Fiber[A] = cats.effect.Fiber[OptionT[F, ?], A]
 
-    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): OptionT[F, A] =
+    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): OptionT[F, A] =
       OptionT.liftF(F.cancelable(k))(F)
 
     def start[A](fa: OptionT[F, A]) =
@@ -557,7 +557,7 @@ object Concurrent {
     // compiler will choke on type inference :-(
     type Fiber[A] = cats.effect.Fiber[StateT[F, S, ?], A]
 
-    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): StateT[F, S, A] =
+    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): StateT[F, S, A] =
       StateT.liftF(F.cancelable(k))(F)
 
     def start[A](fa: StateT[F, S, A]): StateT[F, S, Fiber[A]] =
@@ -593,7 +593,7 @@ object Concurrent {
     // compiler will choke on type inference :-(
     type Fiber[A] = cats.effect.Fiber[WriterT[F, L, ?], A]
 
-    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): WriterT[F, L, A] =
+    def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): WriterT[F, L, A] =
       WriterT.liftF(F.cancelable(k))(L, F)
 
     def uncancelable[A](fa: WriterT[F, L, A]): WriterT[F, L, A] =
@@ -627,7 +627,7 @@ object Concurrent {
     // compiler can choke on type inference :-(
     type Fiber[A] = cats.effect.Fiber[Kleisli[F, R, ?], A]
 
-    override def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): Kleisli[F, R, A] =
+    override def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): Kleisli[F, R, A] =
       Kleisli.liftF(F.cancelable(k))
 
     override def uncancelable[A](fa: Kleisli[F, R, A]): Kleisli[F, R, A] =

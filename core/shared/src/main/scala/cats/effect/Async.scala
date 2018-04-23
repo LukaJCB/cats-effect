@@ -122,7 +122,7 @@ trait Async[F[_]] extends Sync[F] with LiftIO[F] {
    * To access this implementation as a standalone function, you can
    * use [[Async$.liftIO Async.liftIO]] (on the object companion).
    */
-  override def liftIO[A](ioa: IO[A]): F[A] =
+  override def liftIO[A](ioa: IO[Throwable, A]): F[A] =
     Async.liftIO(ioa)(this)
 
   /**
@@ -176,11 +176,11 @@ object Async {
    *
    * This is the default `Async.liftIO` implementation.
    */
-  def liftIO[F[_], A](io: IO[A])(implicit F: Async[F]): F[A] =
+  def liftIO[F[_], A](io: IO[Throwable, A])(implicit F: Async[F]): F[A] =
     io match {
       case Pure(a) => F.pure(a)
       case RaiseError(e) => F.raiseError(e)
-      case Delay(thunk) => F.delay(thunk())
+      case Delay(thunk, f) => F.delay(thunk())
       case _ =>
         F.suspend {
           IORunLoop.step(io) match {

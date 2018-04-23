@@ -58,7 +58,7 @@ private[effect] final class ForwardCancelable private (plusOne: () => Unit)
         throw new IllegalStateException("ForwardCancelable already assigned")
     }
 
-  def :=(task: IO[Unit]): Unit =
+  def :=[E](task: IO[E, Unit]): Unit =
     this.:= { () => task.unsafeRunAsync(Callback.report) }
 }
 

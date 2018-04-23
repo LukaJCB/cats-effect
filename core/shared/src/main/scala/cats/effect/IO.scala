@@ -82,7 +82,7 @@ import scala.util.{Failure, Left, Right, Success}
  *     }
  * }}}
  */
-sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
+sealed abstract class IO[E, +A] {
   import IO._
 
   /**
@@ -95,7 +95,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * failures would be completely silent and `IO` references would
    * never terminate on evaluation.
    */
-  final def map[B](f: A => B): IO[B] =
+  final def map[B](f: A => B): IO[E, B] =
     this match {
       case Map(source, g, index) =>
         // Allowed to do fixed number of map operations fused before
@@ -105,6 +105,18 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
         else Map(this, f, 0)
       case _ =>
         Map(this, f, 0)
+    }
+
+  final def leftMap[X](f: E => X): IO[X, A] =
+    attempt.flatMap {
+      case Left(e) => IO.raiseError[X, A](f(e))
+      case Right(a) => IO.pure[X, A](a)
+    }
+
+  final def bimap[X, B](f: E => X, g: A => B): IO[X, B] =
+    attempt.flatMap {
+      case Left(e) => IO.raiseError[X, B](f(e))
+      case Right(a) => IO.pure[X, B](g(a))
     }
 
   /**
@@ -122,7 +134,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * failures would be completely silent and `IO` references would
    * never terminate on evaluation.
    */
-  final def flatMap[B](f: A => IO[B]): IO[B] =
+  final def flatMap[B](f: A => IO[E, B]): IO[E, B] =
     Bind(this, f)
 
   /**
@@ -138,8 +150,8 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    *
    * @see [[IO.raiseError]]
    */
-  def attempt: IO[Either[Throwable, A]] =
-    Bind(this, AttemptIO.asInstanceOf[A => IO[Either[Throwable, A]]])
+  def attempt[X]: IO[X, Either[E, A]] =
+    Bind(this, AttemptIO.asInstanceOf[A => IO[E, Either[E, A]]]).asInstanceOf[IO[X, Either[E, A]]]
 
   /**
    * Produces an `IO` reference that should execute the source on
@@ -175,9 +187,10 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * @see [[runCancelable]] for the version that gives you a cancelable
    *      token that can be used to send a cancel signal
    */
-  final def runAsync(cb: Either[Throwable, A] => IO[Unit]): IO[Unit] = IO {
+  final def runAsync(cb: Either[E, A] => IO[E, Unit]): IO[Throwable, Unit] = IO {
     unsafeRunAsync(cb.andThen(_.unsafeRunAsync(Callback.report)))
   }
+
 
   /**
    * Produces an `IO` reference that should execute the source on evaluation,
@@ -215,9 +228,9 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    *
    * @see [[runAsync]] for the simple, uninterruptible version
    */
-  final def runCancelable(cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]] = IO {
+  final def runCancelable(cb: Either[E, A] => IO[E, Unit]): IO[Throwable, IO[Throwable, Unit]] = IO {
     val cancel = unsafeRunCancelable(cb.andThen(_.unsafeRunAsync(_ => ())))
-    IO.Delay(cancel)
+    IO.Delay(cancel, identity)
   }
 
   /**
@@ -257,7 +270,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * performs side effects.  You should ideally only call this
    * function ''once'', at the very end of your program.
    */
-  final def unsafeRunAsync(cb: Either[Throwable, A] => Unit): Unit =
+  final def unsafeRunAsync(cb: Either[E, A] => Unit): Unit =
     IORunLoop.start(this, cb)
 
   /**
@@ -272,7 +285,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    *         cancelation reference to `IO`'s run-loop implementation,
    *         having the potential to interrupt it.
    */
-  final def unsafeRunCancelable(cb: Either[Throwable, A] => Unit): () => Unit = {
+  final def unsafeRunCancelable(cb: Either[E, A] => Unit): () => Unit = {
     val conn = IOConnection()
     IORunLoop.startCancelable(this, conn, cb)
     conn.cancel
@@ -307,7 +320,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
   final def unsafeRunTimed(limit: Duration): Option[A] =
     IORunLoop.step(this) match {
       case Pure(a) => Some(a)
-      case RaiseError(e) => throw e
+      case RaiseError(e) => throw new IORunLoop.CustomException(e)
       case self @ Async(_) =>
         IOPlatform.unsafeResync(self, limit)
       case _ =>
@@ -329,7 +342,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    */
   final def unsafeToFuture(): Future[A] = {
     val p = Promise[A]
-    unsafeRunAsync(_.fold(p.failure, p.success))
+    unsafeRunAsync(_.fold(e => p.failure(new IORunLoop.CustomException(e)), p.success))
     p.future
   }
 
@@ -360,7 +373,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * But you can use [[IO.shift(implicit* IO.shift]] to force an async
    * boundary just before start.
    */
-  final def start: IO[Fiber[IO, A @uncheckedVariance]] =
+  final def start: IO[E, Fiber[IO[E, ?], A @uncheckedVariance]] =
     IOStart(this)
 
   /**
@@ -373,160 +386,16 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
    * non-terminating on cancelation into one that yields an error,
    * thus equivalent with [[IO.raiseError]].
    */
-  final def onCancelRaiseError(e: Throwable): IO[A] =
+  final def onCancelRaiseError(e: E): IO[E, A] =
     IOCancel.raise(this, e)
 
   /**
    * Makes the source `IO` uninterruptible such that a [[Fiber.cancel]]
    * signal has no effect.
    */
-  final def uncancelable: IO[A] =
+  final def uncancelable: IO[E, A] =
     IOCancel.uncancelable(this)
 
-  /**
-   * Converts the source `IO` into any `F` type that implements
-   * the [[LiftIO]] type class.
-   */
-  final def to[F[_]](implicit F: LiftIO[F]): F[A @uncheckedVariance] =
-    F.liftIO(this)
-
-  /**
-   * Returns an `IO` action that treats the source task as the
-   * acquisition of a resource, which is then exploited by the `use`
-   * function and then `released`.
-   *
-   * The `bracket` operation is the equivalent of the
-   * `try {} catch {} finally {}` statements from mainstream languages.
-   *
-   * The `bracket` operation installs the necessary exception handler
-   * to release the resource in the event of an exception being raised
-   * during the computation, or in case of cancelation.
-   *
-   * If an exception is raised, then `bracket` will re-raise the
-   * exception ''after'' performing the `release`. If the resulting
-   * task gets cancelled, then `bracket` will still perform the
-   * `release`, but the yielded task will be non-terminating
-   * (equivalent with [[IO.never]]).
-   *
-   * Example:
-   *
-   * {{{
-   *   import java.io._
-   *
-   *   def readFile(file: File): IO[String] = {
-   *     // Opening a file handle for reading text
-   *     val acquire = IO(new BufferedReader(
-   *       new InputStreamReader(new FileInputStream(file), "utf-8")
-   *     ))
-   *
-   *     acquire.bracket { in =>
-   *       // Usage part
-   *       IO {
-   *         // Yes, ugly Java, non-FP loop;
-   *         // side-effects are suspended though
-   *         var line: String = null
-   *         val buff = new StringBuilder()
-   *         do {
-   *           line = in.readLine()
-   *           if (line != null) buff.append(line)
-   *         } while (line != null)
-   *         buff.toString()
-   *       }
-   *     } { in =>
-   *       // The release part
-   *       IO(in.close())
-   *     }
-   *   }
-   * }}}
-   *
-   * Note that in case of cancelation the underlying implementation
-   * cannot guarantee that the computation described by `use` doesn't
-   * end up executed concurrently with the computation from
-   * `release`. In the example above that ugly Java loop might end up
-   * reading from a `BufferedReader` that is already closed due to the
-   * task being cancelled, thus triggering an error in the background
-   * with nowhere to get signaled.
-   *
-   * In this particular example, given that we are just reading from a
-   * file, it doesn't matter. But in other cases it might matter, as
-   * concurrency on top of the JVM when dealing with I/O might lead to
-   * corrupted data.
-   *
-   * For those cases you might want to do synchronization (e.g. usage
-   * of locks and semaphores) and you might want to use [[bracketCase]],
-   * the version that allows you to differentiate between normal
-   * termination and cancelation.
-   *
-   * '''NOTE on error handling''': one big difference versus
-   * `try/finally` statements is that, in case both the `release`
-   * function and the `use` function throws, the error raised by `use`
-   * gets signaled.
-   *
-   * For example:
-   *
-   * {{{
-   *   IO("resource").bracket { _ =>
-   *     // use
-   *     IO.raiseError(new RuntimeException("Foo"))
-   *   } { _ =>
-   *     // release
-   *     IO.raiseError(new RuntimeException("Bar"))
-   *   }
-   * }}}
-   *
-   * In this case the error signaled downstream is `"Foo"`, while the
-   * `"Bar"` error gets reported. This is consistent with the behavior
-   * of Haskell's `bracket` operation and NOT with `try {} finally {}`
-   * from Scala, Java or JavaScript.
-   *
-   * @see [[bracketCase]]
-   *
-   * @param use is a function that evaluates the resource yielded by
-   *        the source, yielding a result that will get generated by
-   *        the task returned by this `bracket` function
-   *
-   * @param release is a function that gets called after `use`
-   *        terminates, either normally or in error, or if it gets
-   *        cancelled, receiving as input the resource that needs to
-   *        be released
-   */
-  final def bracket[B](use: A => IO[B])(release: A => IO[Unit]): IO[B] =
-    bracketCase(use)((a, _) => release(a))
-
-  /**
-   * Returns a new `IO` task that treats the source task as the
-   * acquisition of a resource, which is then exploited by the `use`
-   * function and then `released`, with the possibility of
-   * distinguishing between normal termination and cancelation, such
-   * that an appropriate release of resources can be executed.
-   *
-   * The `bracketCase` operation is the equivalent of
-   * `try {} catch {} finally {}` statements from mainstream languages
-   * when used for the acquisition and release of resources.
-   *
-   * The `bracketCase` operation installs the necessary exception handler
-   * to release the resource in the event of an exception being raised
-   * during the computation, or in case of cancelation.
-   *
-   * In comparison with the simpler [[bracket]] version, this one
-   * allows the caller to differentiate between normal termination,
-   * termination in error and cancelation via an [[ExitCase]]
-   * parameter.
-   *
-   * @see [[bracket]]
-   *
-   * @param use is a function that evaluates the resource yielded by
-   *        the source, yielding a result that will get generated by
-   *        this function on evaluation
-   *
-   * @param release is a function that gets called after `use`
-   *        terminates, either normally or in error, or if it gets
-   *        canceled, receiving as input the resource that needs that
-   *        needs release, along with the result of `use`
-   *        (cancelation, error or successful result)
-   */
-  def bracketCase[B](use: A => IO[B])(release: (A, ExitCase[Throwable]) => IO[Unit]): IO[B] =
-    IOBracket(this)(use)(release)
 
   override def toString = this match {
     case Pure(a) => s"IO($a)"
@@ -536,7 +405,7 @@ sealed abstract class IO[+A] extends internals.IOBinaryCompat[A] {
 }
 
 private[effect] abstract class IOParallelNewtype
-  extends internals.IOTimerRef with internals.IOCompanionBinaryCompat {
+  extends internals.IOTimerRef {
 
   /** Newtype encoding for an `IO` datatype that has a `cats.Applicative`
    * capable of doing parallel processing in `ap` and `map2`, needed
@@ -549,7 +418,7 @@ private[effect] abstract class IOParallelNewtype
    * Alexander Konovalov, chosen because it's devoid of boxing issues and
    * a good choice until opaque types will land in Scala.
    */
-  type Par[+A] = Par.Type[A]
+  type Par[E, +A] = Par.Type[E, A]
 
   /** Newtype encoding, see the [[IO.Par]] type alias
    * for more details.
@@ -558,108 +427,131 @@ private[effect] abstract class IOParallelNewtype
 }
 
 private[effect] abstract class IOLowPriorityInstances extends IOParallelNewtype {
-  private[effect] class IOSemigroup[A: Semigroup] extends Semigroup[IO[A]] {
-    def combine(ioa1: IO[A], ioa2: IO[A]) =
+  private[effect] class IOSemigroup[E, A: Semigroup] extends Semigroup[IO[E, A]] {
+    def combine(ioa1: IO[E, A], ioa2: IO[E, A]) =
       ioa1.flatMap(a1 => ioa2.map(a2 => Semigroup[A].combine(a1, a2)))
   }
 
-  implicit def ioSemigroup[A: Semigroup]: Semigroup[IO[A]] = new IOSemigroup[A]
-}
+  implicit def ioSemigroup[E, A: Semigroup]: Semigroup[IO[E, A]] = new IOSemigroup[E, A]
 
-private[effect] abstract class IOInstances extends IOLowPriorityInstances {
-
-  implicit val parApplicative: Applicative[IO.Par] = new Applicative[IO.Par] {
-    import IO.Par.unwrap
-    import IO.Par.{apply => par}
-
-    override def pure[A](x: A): IO.Par[A] =
-      par(IO.pure(x))
-    override def map2[A, B, Z](fa: IO.Par[A], fb: IO.Par[B])(f: (A, B) => Z): IO.Par[Z] =
-      par(IOParMap(unwrap(fa), unwrap(fb))(f))
-    override def ap[A, B](ff: IO.Par[A => B])(fa: IO.Par[A]): IO.Par[B] =
-      map2(ff, fa)(_(_))
-    override def product[A, B](fa: IO.Par[A], fb: IO.Par[B]): IO.Par[(A, B)] =
-      map2(fa, fb)((_, _))
-    override def map[A, B](fa: IO.Par[A])(f: A => B): IO.Par[B] =
-      par(unwrap(fa).map(f))
-    override def unit: IO.Par[Unit] =
-      par(IO.unit)
-  }
-
-  implicit val ioConcurrentEffect: ConcurrentEffect[IO] = new ConcurrentEffect[IO] {
-    override def pure[A](a: A): IO[A] =
+  implicit def ioMonadError[E]: MonadError[IO[E, ?], E] = new MonadError[IO[E, ?], E] {
+    override def pure[A](a: A): IO[E, A] =
       IO.pure(a)
-    override def flatMap[A, B](ioa: IO[A])(f: A => IO[B]): IO[B] =
+    override def flatMap[A, B](ioa: IO[E, A])(f: A => IO[E, B]): IO[E, B] =
       ioa.flatMap(f)
-    override def map[A, B](fa: IO[A])(f: A => B): IO[B] =
+    override def map[A, B](fa: IO[E, A])(f: A => B): IO[E, B] =
       fa.map(f)
-    override def delay[A](thunk: => A): IO[A] =
-      IO(thunk)
-    override def unit: IO[Unit] =
+    override def unit: IO[E, Unit] =
       IO.unit
-    override def attempt[A](ioa: IO[A]): IO[Either[Throwable, A]] =
+    override def attempt[A](ioa: IO[E, A]): IO[E, Either[E, A]] =
       ioa.attempt
-    override def handleErrorWith[A](ioa: IO[A])(f: Throwable => IO[A]): IO[A] =
+    override def handleErrorWith[A](ioa: IO[E, A])(f: E => IO[E, A]): IO[E, A] =
       IO.Bind(ioa, IOFrame.errorHandler(f))
-    override def raiseError[A](e: Throwable): IO[A] =
+    override def raiseError[A](e: E): IO[E, A] =
       IO.raiseError(e)
-    override def suspend[A](thunk: => IO[A]): IO[A] =
-      IO.suspend(thunk)
-    override def start[A](fa: IO[A]): IO[Fiber[IO, A]] =
-      fa.start
-    override def uncancelable[A](fa: IO[A]): IO[A] =
-      fa.uncancelable
-    override def onCancelRaiseError[A](fa: IO[A], e: Throwable): IO[A] =
-      fa.onCancelRaiseError(e)
-    override def async[A](k: (Either[Throwable, A] => Unit) => Unit): IO[A] =
-      IO.async(k)
-    override def race[A, B](fa: IO[A], fb: IO[B]): IO[Either[A, B]] =
-      IO.race(fa, fb)
-    override def racePair[A, B](fa: IO[A], fb: IO[B]): IO[Either[(A, Fiber[IO, B]), (Fiber[IO, A], B)]] =
-      IO.racePair(fa, fb)
-    override def runAsync[A](ioa: IO[A])(cb: Either[Throwable, A] => IO[Unit]): IO[Unit] =
-      ioa.runAsync(cb)
-    override def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): IO[A] =
-      IO.cancelable(k)
-    override def runCancelable[A](fa: IO[A])(cb: Either[Throwable, A] => IO[Unit]): IO[IO[Unit]] =
-      fa.runCancelable(cb)
-    override def liftIO[A](ioa: IO[A]): IO[A] =
-      ioa
-    // this will use stack proportional to the maximum number of joined async suspensions
-    override def tailRecM[A, B](a: A)(f: A => IO[Either[A, B]]): IO[B] =
+
+    override def tailRecM[A, B](a: A)(f: A => IO[E, Either[A, B]]): IO[E, B] =
       f(a) flatMap {
         case Left(a) => tailRecM(a)(f)
         case Right(b) => pure(b)
       }
-    override def bracket[A, B](acquire: IO[A])
-      (use: A => IO[B])
-      (release: A => IO[Unit]): IO[B] =
-      acquire.bracket(use)(release)
-    override def bracketCase[A, B](acquire: IO[A])
-      (use: A => IO[B])
-      (release: (A, ExitCase[Throwable]) => IO[Unit]): IO[B] =
-      acquire.bracketCase(use)(release)
+  }
+}
+
+private[effect] abstract class IOInstances extends IOLowPriorityInstances {
+
+  implicit def parApplicative[E <: AnyRef]: Applicative[IO.Par[E, ?]] = new Applicative[IO.Par[E, ?]] {
+    import IO.Par.unwrap
+    import IO.Par.{apply => par}
+
+    override def pure[A](x: A): IO.Par[E, A] =
+      par(IO.pure(x))
+    override def map2[A, B, Z](fa: IO.Par[E, A], fb: IO.Par[E, B])(f: (A, B) => Z): IO.Par[E, Z] =
+      par[E, Z](IOParMap(unwrap[E, A](fa), unwrap[E, B](fb))(f))
+    override def ap[A, B](ff: IO.Par[E, A => B])(fa: IO.Par[E, A]): IO.Par[E, B] =
+      map2(ff, fa)(_(_))
+    override def product[A, B](fa: IO.Par[E, A], fb: IO.Par[E, B]): IO.Par[E, (A, B)] =
+      map2(fa, fb)((_, _))
+    override def map[A, B](fa: IO.Par[E, A])(f: A => B): IO.Par[E, B] =
+      par(unwrap(fa).map(f))
+    override def unit: IO.Par[E, Unit] =
+      par(IO.unit)
   }
 
-  implicit val ioParallel: Parallel[IO, IO.Par] =
-    new Parallel[IO, IO.Par] {
-      override def applicative: Applicative[IO.Par] =
+  implicit val ioConcurrentEffect: ConcurrentEffect[IO[Throwable, ?]] = new ConcurrentEffect[IO[Throwable, ?]] {
+    override def pure[A](a: A): IO[Throwable, A] =
+      IO.pure(a)
+    override def flatMap[A, B](ioa: IO[Throwable, A])(f: A => IO[Throwable, B]): IO[Throwable, B] =
+      ioa.flatMap(f)
+    override def map[A, B](fa: IO[Throwable, A])(f: A => B): IO[Throwable, B] =
+      fa.map(f)
+    override def delay[A](thunk: => A): IO[Throwable, A] =
+      IO(thunk)
+    override def unit: IO[Throwable, Unit] =
+      IO.unit
+    override def attempt[A](ioa: IO[Throwable, A]): IO[Throwable, Either[Throwable, A]] =
+      ioa.attempt
+    override def handleErrorWith[A](ioa: IO[Throwable, A])(f: Throwable => IO[Throwable, A]): IO[Throwable, A] =
+      IO.Bind(ioa, IOFrame.errorHandler(f))
+    override def raiseError[A](e: Throwable): IO[Throwable, A] =
+      IO.raiseError(e)
+    override def suspend[A](thunk: => IO[Throwable, A]): IO[Throwable, A] =
+      IO.suspend(thunk)
+    override def start[A](fa: IO[Throwable, A]): IO[Throwable, Fiber[IO[Throwable, ?], A]] =
+      fa.start
+    override def uncancelable[A](fa: IO[Throwable, A]): IO[Throwable, A] =
+      fa.uncancelable
+    override def onCancelRaiseError[A](fa: IO[Throwable, A], e: Throwable): IO[Throwable, A] =
+      fa.onCancelRaiseError(e)
+    override def async[A](k: (Either[Throwable, A] => Unit) => Unit): IO[Throwable, A] =
+      IO.async(k)
+    override def race[A, B](fa: IO[Throwable, A], fb: IO[Throwable, B]): IO[Throwable, Either[A, B]] =
+      IO.race(fa, fb)
+    override def racePair[A, B](fa: IO[Throwable, A], fb: IO[Throwable, B]): IO[Throwable, Either[(A, Fiber[IO[Throwable, ?], B]), (Fiber[IO[Throwable, ?], A], B)]] =
+      IO.racePair(fa, fb)
+    override def runAsync[A](ioa: IO[Throwable, A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, Unit] =
+      ioa.runAsync(cb)
+    override def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Throwable, Unit]): IO[Throwable, A] =
+      IO.cancelable(k)
+    override def runCancelable[A](fa: IO[Throwable, A])(cb: Either[Throwable, A] => IO[Throwable, Unit]): IO[Throwable, IO[Throwable, Unit]] =
+      fa.runCancelable(cb)
+    override def liftIO[A](ioa: IO[Throwable, A]): IO[Throwable, A] =
+      ioa
+    // this will use stack proportional to the maximum number of joined async suspensions
+    override def tailRecM[A, B](a: A)(f: A => IO[Throwable, Either[A, B]]): IO[Throwable, B] =
+      f(a) flatMap {
+        case Left(a) => tailRecM(a)(f)
+        case Right(b) => pure(b)
+      }
+    override def bracketCase[A, B](acquire: IO[Throwable, A])
+      (use: A => IO[Throwable, B])
+      (release: (A, ExitCase[Throwable]) => IO[Throwable, Unit]): IO[Throwable, B] =
+      IOBracket(acquire)(use)(release)
+  }
+
+  implicit def ioParallel[E <: AnyRef]: Parallel[IO[E, ?], IO.Par[E, ?]] =
+    new Parallel[IO[E, ?], IO.Par[E, ?]] {
+      override def applicative: Applicative[IO.Par[E, ?]] =
         parApplicative
-      override def monad: Monad[IO] =
-        ioConcurrentEffect
-      override val sequential: ~>[IO.Par, IO] =
-        new FunctionK[IO.Par, IO] { def apply[A](fa: IO.Par[A]): IO[A] = IO.Par.unwrap(fa) }
-      override val parallel: ~>[IO, IO.Par] =
-        new FunctionK[IO, IO.Par] { def apply[A](fa: IO[A]): IO.Par[A] = IO.Par(fa) }
+      override def monad: Monad[IO[E, ?]] =
+        ioMonadError
+      override val sequential: ~>[IO.Par[E, ?], IO[E, ?]] =
+        new FunctionK[IO.Par[E, ?], IO[E, ?]] {
+          def apply[A](fa: IO.Par[E, A]): IO[E, A] = IO.Par.unwrap(fa)
+        }
+      override val parallel: ~>[IO[E, ?], IO.Par[E, ?]] =
+        new FunctionK[IO[E, ?], IO.Par[E, ?]] {
+          def apply[A](fa: IO[E, A]): IO.Par[E, A] = IO.Par(fa)
+        }
     }
 
-  implicit def ioMonoid[A: Monoid]: Monoid[IO[A]] = new IOSemigroup[A] with Monoid[IO[A]] {
+  implicit def ioMonoid[E, A: Monoid]: Monoid[IO[E, A]] = new IOSemigroup[E, A] with Monoid[IO[E, A]] {
     def empty = IO.pure(Monoid[A].empty)
   }
 
-  implicit val ioSemigroupK: SemigroupK[IO] = new SemigroupK[IO] {
-    def combineK[A](a: IO[A], b: IO[A]): IO[A] =
-      ApplicativeError[IO, Throwable].handleErrorWith(a)(_ => b)
+  implicit val ioSemigroupK: SemigroupK[IO[Throwable, ?]] = new SemigroupK[IO[Throwable, ?]] {
+    def combineK[A](a: IO[Throwable, A], b: IO[Throwable, A]): IO[Throwable, A] =
+      ApplicativeError[IO[Throwable, ?], Throwable].handleErrorWith(a)(_ => b)
   }
 }
 
@@ -769,7 +661,10 @@ object IO extends IOInstances {
    * Any exceptions thrown by the effect will be caught and sequenced
    * into the `IO`.
    */
-  def apply[A](body: => A): IO[A] = Delay(body _)
+  def apply[A](body: => A): IO[Throwable, A] = Delay(body _, identity)
+
+
+  def unsafeNoCatch[E, A](body: => A): IO[E, A] = Delay(body _, _.asInstanceOf)
 
   /**
    * Suspends a synchronous side effect which produces an `IO` in `IO`.
@@ -779,8 +674,8 @@ object IO extends IOInstances {
    * thrown by the side effect will be caught and sequenced into the
    * `IO`.
    */
-  def suspend[A](thunk: => IO[A]): IO[A] =
-    Suspend(thunk _)
+  def suspend[E, A](thunk: => IO[Throwable, A]): IO[Throwable, A] =
+    Suspend(thunk _, identity)
 
   /**
    * Suspends a pure value in `IO`.
@@ -792,15 +687,15 @@ object IO extends IOInstances {
    * (when evaluated) than `IO(42)`, due to avoiding the allocation of
    * extra thunks.
    */
-  def pure[A](a: A): IO[A] = Pure(a)
+  def pure[E, A](a: A): IO[E, A] = Pure(a)
 
   /** Alias for `IO.pure(())`. */
-  val unit: IO[Unit] = pure(())
+  def unit[E]: IO[E, Unit] = pure(())
 
   /**
    * A non-terminating `IO`, alias for `async(_ => ())`.
    */
-  val never: IO[Nothing] = async(_ => ())
+  def never[E]: IO[E, Nothing] = async(_ => ())
 
   /**
    * Lifts an `Eval` into `IO`.
@@ -810,7 +705,7 @@ object IO extends IOInstances {
    * instances will be converted into thunk-less `IO` (i.e. eager
    * `IO`), while lazy eval and memoized will be executed as such.
    */
-  def eval[A](fa: Eval[A]): IO[A] = fa match {
+  def eval[A](fa: Eval[A]): IO[Throwable, A] = fa match {
     case Now(a) => pure(a)
     case notNow => apply(notNow.value)
   }
@@ -850,25 +745,25 @@ object IO extends IOInstances {
    * version of `Promise`, where `IO` is like a safer, lazy version of
    * `Future`.
    */
-  def async[A](k: (Either[Throwable, A] => Unit) => Unit): IO[A] = {
-    Async { (_, cb) =>
+  def async[E, A](k: (Either[E, A] => Unit) => Unit): IO[E, A] = {
+    Async[E, A] { (_, cb) =>
       val cb2 = Callback.asyncIdempotent(null, cb)
-      try k(cb2) catch { case NonFatal(t) => cb2(Left(t)) }
+      try k(cb2) catch { case NonFatal(t) => Logger.reportFailure(t) }
     }
   }
 
   /**
    * Builds a cancelable `IO`.
    */
-  def cancelable[A](k: (Either[Throwable, A] => Unit) => IO[Unit]): IO[A] =
-    Async { (conn, cb) =>
+  def cancelable[E, A](k: (Either[E, A] => Unit) => IO[E, Unit]): IO[E, A] =
+    Async[E, A] { (conn, cb) =>
       val cb2 = Callback.asyncIdempotent(conn, cb)
       val ref = ForwardCancelable()
       conn.push(ref)
 
       ref := (
         try k(cb2) catch { case NonFatal(t) =>
-          cb2(Left(t))
+          Logger.reportFailure(t)
           IO.unit
         })
     }
@@ -883,7 +778,7 @@ object IO extends IOInstances {
    *
    * @see [[IO#attempt]]
    */
-  def raiseError[A](e: Throwable): IO[A] = RaiseError(e)
+  def raiseError[E, A](e: E): IO[E, A] = RaiseError(e)
 
   /**
    * Constructs an `IO` which evaluates the given `Future` and
@@ -915,7 +810,7 @@ object IO extends IOInstances {
    *
    * @see [[IO#unsafeToFuture]]
    */
-  def fromFuture[A](iof: IO[Future[A]]): IO[A] =
+  def fromFuture[A](iof: IO[Throwable, Future[A]]): IO[Throwable, A] =
     iof.flatMap { f =>
       IO.async { cb =>
         f.onComplete(r => cb(r match {
@@ -929,7 +824,7 @@ object IO extends IOInstances {
    * Lifts an Either[Throwable, A] into the IO[A] context raising the throwable
    * if it exists.
    */
-  def fromEither[A](e: Either[Throwable, A]): IO[A] =
+  def fromEither[E, A](e: Either[E, A]): IO[E, A] =
     e match {
       case Right(a) => pure(a)
       case Left(err) => raiseError(err)
@@ -947,7 +842,7 @@ object IO extends IOInstances {
    * @param timer is the [[Timer]] that's managing the thread-pool
    *        used to trigger this async boundary
    */
-  def shift(implicit timer: Timer[IO]): IO[Unit] =
+  def shift[E](implicit timer: Timer[IO[E, ?]]): IO[E, Unit] =
     timer.shift
 
   /**
@@ -962,7 +857,7 @@ object IO extends IOInstances {
    * @param ec is the Scala `ExecutionContext` that's managing the
    *        thread-pool used to trigger this async boundary
    */
-  def shift(ec: ExecutionContext): IO[Unit] = {
+  def shift(ec: ExecutionContext): IO[Throwable, Unit] = {
     IO.Async { (_, cb: Either[Throwable, Unit] => Unit) =>
       ec.execute(new Runnable {
         def run() = cb(Callback.rightUnit)
@@ -1007,7 +902,7 @@ object IO extends IOInstances {
    * @return a new asynchronous and cancelable `IO` that will sleep for
    *         the specified duration and then finally emit a tick
    */
-  def sleep(duration: FiniteDuration)(implicit timer: Timer[IO]): IO[Unit] =
+  def sleep[E](duration: FiniteDuration)(implicit timer: Timer[IO[E, ?]]): IO[E, Unit] =
     timer.sleep(duration)
 
   /**
@@ -1036,8 +931,8 @@ object IO extends IOInstances {
    *    }
    * }}}
    */
-  val cancelBoundary: IO[Unit] = {
-    IO.Async { (conn, cb) =>
+  def cancelBoundary[E]: IO[E, Unit] = {
+    IO.Async[E, Unit] { (conn, cb) =>
       if (!conn.isCanceled)
         cb.async(Callback.rightUnit)
     }
@@ -1080,7 +975,7 @@ object IO extends IOInstances {
    * Also see [[racePair]] for a version that does not cancel
    * the loser automatically on successful results.
    */
-  def race[A, B](lh: IO[A], rh: IO[B]): IO[Either[A, B]] =
+  def race[E, A, B](lh: IO[E, A], rh: IO[E, B]): IO[E, Either[A, B]] =
     IORace.simple(lh, rh)
 
   /**
@@ -1111,41 +1006,41 @@ object IO extends IOInstances {
    * See [[race]] for a simpler version that cancels the loser
    * immediately.
    */
-  def racePair[A, B](lh: IO[A], rh: IO[B]): IO[Either[(A, Fiber[IO, B]), (Fiber[IO, A], B)]] =
+  def racePair[E, A, B](lh: IO[E, A], rh: IO[E, B]): IO[E, Either[(A, Fiber[IO[E, ?], B]), (Fiber[IO[E, ?], A], B)]] =
     IORace.pair(lh, rh)
 
-  private[effect] final case class Pure[+A](a: A)
-    extends IO[A]
-  private[effect] final case class Delay[+A](thunk: () => A)
-    extends IO[A]
-  private[effect] final case class RaiseError(e: Throwable)
-    extends IO[Nothing]
-  private[effect] final case class Suspend[+A](thunk: () => IO[A])
-    extends IO[A]
-  private[effect] final case class Bind[E, +A](source: IO[E], f: E => IO[A])
-    extends IO[A]
-  private[effect] final case class Async[+A](
-    k: (IOConnection, Either[Throwable, A] => Unit) => Unit)
-    extends IO[A]
+  private[effect] final case class Pure[E, +A](a: A)
+    extends IO[E, A]
+  private[effect] final case class Delay[E, +A](thunk: () => A, f: Throwable => E)
+    extends IO[E, A]
+  private[effect] final case class RaiseError[E](e: E)
+    extends IO[E, Nothing]
+  private[effect] final case class Suspend[E, +A](thunk: () => IO[E, A], f: Throwable => E)
+    extends IO[E, A]
+  private[effect] final case class Bind[R, E, +A](source: IO[E, R], f: R => IO[E, A])
+    extends IO[E, A]
+  private[effect] final case class Async[E, +A](
+    k: (IOConnection, Either[E, A] => Unit) => Unit)
+    extends IO[E, A]
 
   /** State for representing `map` ops that itself is a function in
    * order to avoid extraneous memory allocations when building the
    * internal call-stack.
    */
-  private[effect] final case class Map[E, +A](source: IO[E], f: E => A, index: Int)
-    extends IO[A] with (E => IO[A]) {
+  private[effect] final case class Map[X, E, +A](source: IO[X, E], f: E => A, index: Int)
+    extends IO[X, A] with (E => IO[X, A]) {
 
-    override def apply(value: E): IO[A] =
+    override def apply(value: E): IO[X, A] =
       IO.pure(f(value))
   }
 
   /** Internal reference, used as an optimization for [[IO.attempt]]
    * in order to avoid extraneous memory allocations.
    */
-  private object AttemptIO extends IOFrame[Any, IO[Either[Throwable, Any]]] {
+  private object AttemptIO extends IOFrame[Any, Any, IO[Any, Either[Any, Any]]] {
     override def apply(a: Any) =
       Pure(Right(a))
-    override def recover(e: Throwable) =
+    override def recover(e: Any) =
       Pure(Left(e))
   }
 }

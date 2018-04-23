@@ -31,33 +31,33 @@ import scala.concurrent.duration.{FiniteDuration, MILLISECONDS, NANOSECONDS, Tim
  */
 private[internals] final class IOTimer private (
   ec: ExecutionContext, sc: ScheduledExecutorService)
-  extends Timer[IO] {
+  extends Timer[IO[Throwable, ?]] {
 
   import IOTimer._
 
-  override def clockRealTime(unit: TimeUnit): IO[Long] =
+  override def clockRealTime(unit: TimeUnit): IO[Throwable, Long] =
     IO(unit.convert(System.currentTimeMillis(), MILLISECONDS))
 
-  override def clockMonotonic(unit: TimeUnit): IO[Long] =
+  override def clockMonotonic(unit: TimeUnit): IO[Throwable, Long] =
     IO(unit.convert(System.nanoTime(), NANOSECONDS))
 
-  override def sleep(timespan: FiniteDuration): IO[Unit] =
+  override def sleep(timespan: FiniteDuration): IO[Throwable, Unit] =
     IO.cancelable { cb =>
       val f = sc.schedule(new ShiftTick(cb, ec), timespan.length, timespan.unit)
       IO(f.cancel(false))
     }
 
-  override def shift: IO[Unit] =
+  override def shift: IO[Throwable, Unit] =
     IO.async(cb => ec.execute(new Tick(cb)))
 }
 
 private[internals] object IOTimer {
   /** Builder. */
-  def apply(ec: ExecutionContext): Timer[IO] =
+  def apply(ec: ExecutionContext): Timer[IO[Throwable, ?]] =
     apply(ec, scheduler)
 
   /** Builder. */
-  def apply(ec: ExecutionContext, sc: ScheduledExecutorService): Timer[IO] =
+  def apply(ec: ExecutionContext, sc: ScheduledExecutorService): Timer[IO[Throwable, ?]] =
     new IOTimer(ec, scheduler)
 
   private lazy val scheduler: ScheduledExecutorService =

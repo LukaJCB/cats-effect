@@ -20,7 +20,7 @@ package effect
 package object implicits extends Effect.ToEffectOps {
 
   // this has to be implicitly enriched to get around variance questions
-  final implicit class IOSyntax[A](val self: IO[A]) extends AnyVal {
+  final implicit class IOSyntax[A](val self: IO[Throwable, A]) extends AnyVal {
     final def liftIO[F[_]: LiftIO]: F[A] = LiftIO[F].liftIO(self)
   }
 }

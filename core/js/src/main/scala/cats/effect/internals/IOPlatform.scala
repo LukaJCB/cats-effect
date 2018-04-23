@@ -25,7 +25,7 @@ private[effect] object IOPlatform {
    * of an IO task, unfortunately blocking is not possible for JS,
    * so all we can do is to throw an error.
    */
-  def unsafeResync[A](ioa: IO[A], limit: Duration): Option[A] = {
+  def unsafeResync[E, A](ioa: IO[E, A], limit: Duration): Option[A] = {
     throw new UnsupportedOperationException(
       "cannot synchronously await result on JavaScript; " +
       "use runAsync or unsafeRunAsync")

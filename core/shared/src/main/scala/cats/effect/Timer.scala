@@ -176,7 +176,7 @@ object Timer {
    * Derives a [[Timer]] for any type that has a [[LiftIO]] instance,
    * from the implicitly available `Timer[IO]` that should be in scope.
    */
-  def derive[F[_]](implicit F: LiftIO[F], timer: Timer[IO]): Timer[F] =
+  def derive[F[_]](implicit F: LiftIO[F], timer: Timer[IO[Throwable, ?]]): Timer[F] =
     new Timer[F] {
       def shift: F[Unit] =
         F.liftIO(timer.shift)

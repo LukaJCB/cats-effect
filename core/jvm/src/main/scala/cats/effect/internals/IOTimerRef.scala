@@ -34,7 +34,7 @@ private[effect] abstract class IOTimerRef {
    * @param ec is the execution context used for actual execution
    *        tasks (e.g. bind continuations)
    */
-  implicit def timer(implicit ec: ExecutionContext): Timer[IO] =
+  implicit def timer(implicit ec: ExecutionContext): Timer[IO[Throwable, ?]] =
     ec match {
       case ExecutionContext.Implicits.global =>
         IOTimerRef.defaultIOTimer
@@ -55,12 +55,12 @@ private[effect] abstract class IOTimerRef {
    * @param sc is the `ScheduledExecutorService` used for scheduling
    *        ticks with a delay
    */
-  def timer(ec: ExecutionContext, sc: ScheduledExecutorService): Timer[IO] =
+  def timer(ec: ExecutionContext, sc: ScheduledExecutorService): Timer[IO[Throwable, ?]] =
     IOTimer(ec, sc)
 }
 
 private[internals] object IOTimerRef {
   /** Default, reusable instance, using Scala's `global`. */
-  private final lazy val defaultIOTimer: Timer[IO] =
+  private final lazy val defaultIOTimer: Timer[IO[Throwable, ?]] =
     IOTimer(ExecutionContext.Implicits.global)
 }

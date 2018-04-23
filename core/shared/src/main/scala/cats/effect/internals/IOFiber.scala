@@ -25,17 +25,17 @@ import cats.effect.internals.Callback.Extensions
  *
  * Not exposed, the `IO` implementation exposes [[Fiber]] directly.
  */
-private[effect] final case class IOFiber[A](join: IO[A])
-  extends Fiber[IO, A] {
+private[effect] final case class IOFiber[E, A](join: IO[E, A])
+  extends Fiber[IO[E, ?], A] {
 
-  def cancel: IO[Unit] =
+  def cancel: IO[E, Unit] =
     IOCancel.signal(join)
 }
 
 private[effect] object IOFiber {
   /** Internal API */
-  def build[A](p: Promise[Either[Throwable, A]], conn: IOConnection): Fiber[IO, A] =
-    IOFiber(IO.Async[A] { (ctx, cb) =>
+  def build[E, A](p: Promise[Either[E, A]], conn: IOConnection): Fiber[IO[E, ?], A] =
+    IOFiber(IO.Async[E, A] { (ctx, cb) =>
       implicit val ec = TrampolineEC.immediate
 
       // Short-circuit for already completed `Future`

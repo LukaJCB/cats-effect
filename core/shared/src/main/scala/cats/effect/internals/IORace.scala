@@ -28,12 +28,12 @@ private[effect] object IORace {
    * but this way it is more efficient, as we no longer have to keep
    * internal promises.
    */
-  def simple[A, B](lh: IO[A], rh: IO[B]): IO[Either[A, B]] = {
+  def simple[E, A, B](lh: IO[E, A], rh: IO[E, B]): IO[E, Either[A, B]] = {
     // Signals successful results
     def onSuccess[T, U](
       isActive: AtomicBoolean,
       other: IOConnection,
-      cb: Callback[Either[T, U]],
+      cb: Callback[E, Either[T, U]],
       r: Either[T, U]): Unit = {
 
       if (isActive.getAndSet(false)) {
@@ -45,15 +45,15 @@ private[effect] object IORace {
 
     def onError[T](
       active: AtomicBoolean,
-      cb: Callback.Type[T],
+      cb: Callback.Type[E, T],
       other: IOConnection,
-      err: Throwable): Unit = {
+      err: E): Unit = {
 
       if (active.getAndSet(false)) {
         try other.cancel()
         finally cb.async(Left(err))
       } else {
-        Logger.reportFailure(err)
+        Logger.reportFailure(new IORunLoop.CustomException(err))
       }
     }
 
@@ -65,7 +65,7 @@ private[effect] object IORace {
       val connR = IOConnection()
 
       // Starts concurrent execution for the left value
-      IORunLoop.startCancelable[A](lh, connL, {
+      IORunLoop.startCancelable[E, A](lh, connL, {
         case Right(a) =>
           onSuccess(active, connR, cb, Left(a))
         case Left(err) =>
@@ -73,7 +73,7 @@ private[effect] object IORace {
       })
 
       // Starts concurrent execution for the right value
-      IORunLoop.startCancelable[B](rh, connR, {
+      IORunLoop.startCancelable[E, B](rh, connR, {
         case Right(b) =>
           onSuccess(active, connL, cb, Right(b))
         case Left(err) =>
@@ -81,28 +81,28 @@ private[effect] object IORace {
       })
 
       // Composite cancelable that cancels both
-      IO(Cancelable.cancelAll(connL.cancel, connR.cancel))
+      IO.unsafeNoCatch(Cancelable.cancelAll(connL.cancel, connR.cancel))
     }
   }
 
   /**
    * Implementation for `IO.racePair`
    */
-  def pair[A, B](lh: IO[A], rh: IO[B]): IO[Either[(A, Fiber[IO, B]), (Fiber[IO, A], B)]] = {
+  def pair[E, A, B](lh: IO[E, A], rh: IO[E, B]): IO[E, Either[(A, Fiber[IO[E, ?], B]), (Fiber[IO[E, ?], A], B)]] = {
     IO.cancelable { cb =>
       val active = new AtomicBoolean(true)
       // Cancelable connection for the left value
       val connL = IOConnection()
-      val promiseL = Promise[Either[Throwable, A]]()
+      val promiseL = Promise[Either[E, A]]()
       // Cancelable connection for the right value
       val connR = IOConnection()
-      val promiseR = Promise[Either[Throwable, B]]()
+      val promiseR = Promise[Either[E, B]]()
 
       // Starts concurrent execution for the left value
-      IORunLoop.startCancelable[A](lh, connL, {
+      IORunLoop.startCancelable[E, A](lh, connL, {
         case Right(a) =>
           if (active.getAndSet(false))
-            cb.async(Right(Left((a, IOFiber.build[B](promiseR, connR)))))
+            cb.async(Right(Left((a, IOFiber.build[E, B](promiseR, connR)))))
           else
             promiseL.trySuccess(Right(a))
 
@@ -116,10 +116,10 @@ private[effect] object IORace {
       })
 
       // Starts concurrent execution for the right value
-      IORunLoop.startCancelable[B](rh, connR, {
+      IORunLoop.startCancelable[E, B](rh, connR, {
         case Right(b) =>
           if (active.getAndSet(false))
-            cb.async(Right(Right((IOFiber.build[A](promiseL, connL), b))))
+            cb.async(Right(Right((IOFiber.build[E, A](promiseL, connL), b))))
           else
             promiseR.trySuccess(Right(b))
 
@@ -133,7 +133,7 @@ private[effect] object IORace {
       })
 
       // Composite cancelable that cancels both
-      IO(Cancelable.cancelAll(connL.cancel, connR.cancel))
+      IO.unsafeNoCatch(Cancelable.cancelAll(connL.cancel, connR.cancel))
     }
   }
 }
